@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -14,23 +13,17 @@ from session_manager import SessionManager
 
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level="INFO",
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("terminal-engine")
 
-DEFAULT_ALLOWED_ORIGINS = "http://localhost,http://127.0.0.1"
-ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS).split(",")
-    if origin.strip()
-]
-WEBSOCKET_IDLE_TIMEOUT = int(os.getenv("WEBSOCKET_IDLE_TIMEOUT", "300"))
+WEBSOCKET_IDLE_TIMEOUT = 300
 
 app = FastAPI(title="Terminal Engine Service")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,21 +81,10 @@ async def send_error_response(session: Any, websocket: WebSocket, output: str) -
     )
 
 
-def is_origin_allowed(origin: str | None) -> bool:
-    if not origin:
-        return True
-    return origin in ALLOWED_ORIGINS
-
-
 @app.websocket("/terminal")
 async def terminal(websocket: WebSocket) -> None:
     logger.info("WebSocket handler triggered")
     origin = websocket.headers.get("origin")
-    if not is_origin_allowed(origin):
-        logger.warning("Rejected WebSocket connection from origin=%s", origin)
-        await websocket.close(code=1008, reason="Origin not allowed")
-        return
-
     await websocket.accept()
     session = sessions.create()
     logger.info("WebSocket accepted for session_id=%s origin=%s", session.session_id, origin)
