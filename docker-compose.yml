@@ -1,0 +1,8 @@
+version: "3.8"
+
+services:
+  terminal-engine:
+    build: .
+    ports:
+      - "4041:4041"
+    restart: always
