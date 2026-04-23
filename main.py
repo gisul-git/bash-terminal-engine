@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -11,10 +13,24 @@ from execution_engine import CommandExecutionEngine
 from session_manager import SessionManager
 
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("terminal-engine")
+
+DEFAULT_ALLOWED_ORIGINS = "http://localhost,http://127.0.0.1"
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS).split(",")
+    if origin.strip()
+]
+WEBSOCKET_IDLE_TIMEOUT = int(os.getenv("WEBSOCKET_IDLE_TIMEOUT", "300"))
+
 app = FastAPI(title="Terminal Engine Service")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -25,7 +41,7 @@ sessions = SessionManager()
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok", "sessions": len(sessions.sessions)})
+    return JSONResponse({"status": "ok", "active_sessions": len(sessions.sessions)})
 
 
 def command_delay(command: str) -> float:
@@ -38,16 +54,14 @@ def command_delay(command: str) -> float:
 
 
 def format_response(session: Any, result: dict[str, Any]) -> dict[str, Any]:
-    output = "\n".join(
-        part for part in (result.get("output", ""), result.get("error", "")) if part
-    )
-    if output is None:
-        output = ""
+    output = result.get("output") or ""
+    error = result.get("error") or ""
+    combined_output = "\n".join(part for part in (output, error) if part)
 
     return {
         "type": "response",
         "data": {
-            "output": output,
+            "output": combined_output,
             "prompt": sessions.generate_prompt(session),
         },
     }
@@ -62,12 +76,36 @@ def build_terminal_history(session: Any) -> str:
     return "\n".join(lines)
 
 
+async def send_error_response(session: Any, websocket: WebSocket, output: str) -> None:
+    await websocket.send_json(
+        {
+            "type": "response",
+            "data": {
+                "output": output,
+                "prompt": sessions.generate_prompt(session),
+            },
+        }
+    )
+
+
+def is_origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return True
+    return origin in ALLOWED_ORIGINS
+
+
 @app.websocket("/terminal")
 async def terminal(websocket: WebSocket) -> None:
-    print("Client connected")
+    logger.info("WebSocket handler triggered")
+    origin = websocket.headers.get("origin")
+    if not is_origin_allowed(origin):
+        logger.warning("Rejected WebSocket connection from origin=%s", origin)
+        await websocket.close(code=1008, reason="Origin not allowed")
+        return
+
     await websocket.accept()
     session = sessions.create()
-    print("Sending init")
+    logger.info("WebSocket accepted for session_id=%s origin=%s", session.session_id, origin)
 
     await websocket.send_json(
         {
@@ -81,19 +119,54 @@ async def terminal(websocket: WebSocket) -> None:
 
     try:
         while True:
-            message: dict[str, Any] = await websocket.receive_json()
-            print("Received:", message)
+            try:
+                message = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=WEBSOCKET_IDLE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "WebSocket idle timeout for session_id=%s after %ss",
+                    session.session_id,
+                    WEBSOCKET_IDLE_TIMEOUT,
+                )
+                await send_error_response(session, websocket, "Connection timed out")
+                await websocket.close(code=1000, reason="Idle timeout")
+                break
+            except WebSocketDisconnect:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Invalid JSON for session_id=%s error=%s",
+                    session.session_id,
+                    str(exc),
+                )
+                await send_error_response(session, websocket, "Invalid input format")
+                continue
+
+            if not isinstance(message, dict):
+                logger.warning(
+                    "Invalid message payload type for session_id=%s payload_type=%s",
+                    session.session_id,
+                    type(message).__name__,
+                )
+                await send_error_response(session, websocket, "Invalid input format")
+                continue
+
+            logger.info("Received: %s", message)
+            if "type" not in message:
+                logger.warning("Missing message type for session_id=%s", session.session_id)
+                await send_error_response(session, websocket, "Missing message type")
+                continue
+
             message_type = message.get("type")
 
             if message_type == "command":
                 command = str(message.get("data", ""))
                 prompt_before = sessions.generate_prompt(session)
                 result = engine.execute(session, command)
-                visible_output = "\n".join(
-                    part for part in (result.get("output", ""), result.get("error", "")) if part
-                )
-                if visible_output is None:
-                    visible_output = ""
+                output = result.get("output") or ""
+                error = result.get("error") or ""
+                visible_output = "\n".join(part for part in (output, error) if part)
                 session.history.append(
                     {
                         "prompt": prompt_before,
@@ -103,7 +176,7 @@ async def terminal(websocket: WebSocket) -> None:
                 )
                 await asyncio.sleep(command_delay(command))
 
-                print("Sending response")
+                logger.info("Sending response")
                 await websocket.send_json(format_response(session, result))
                 continue
 
@@ -128,16 +201,14 @@ async def terminal(websocket: WebSocket) -> None:
                     "exit_code": 1,
                     "duration_ms": 0,
                 }
-                print("Sending response")
+                logger.info("Sending response")
                 await websocket.send_json(format_response(session, result))
                 continue
 
             if message_type == "submit":
                 session.result = engine.evaluate(session)
                 history_output = build_terminal_history(session)
-                if history_output is None:
-                    history_output = ""
-                print("Sending response")
+                logger.info("Sending response")
                 await websocket.send_json(
                     {
                         "type": "response",
@@ -149,17 +220,25 @@ async def terminal(websocket: WebSocket) -> None:
                 )
                 continue
 
-            print("Sending response")
-            await websocket.send_json(
-                {
-                    "type": "response",
-                    "data": {
-                        "output": f"Unsupported message type: {message_type}",
-                        "prompt": sessions.generate_prompt(session),
-                    },
-                }
+            logger.info("Sending response")
+            await send_error_response(
+                session, websocket, f"Unsupported message type: {message_type}"
             )
 
     except WebSocketDisconnect:
-        print("Client disconnected")
+        logger.info("Client disconnected session_id=%s", session.session_id)
+    except Exception as exc:
+        logger.exception("Unhandled error in session_id=%s error=%s", session.session_id, str(exc))
+        try:
+            await send_error_response(session, websocket, "Internal server error")
+        except Exception:
+            logger.debug(
+                "Failed to send internal error response for session_id=%s",
+                session.session_id,
+            )
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            logger.debug("WebSocket already closed for session_id=%s", session.session_id)
+    finally:
         sessions.delete(session.session_id)

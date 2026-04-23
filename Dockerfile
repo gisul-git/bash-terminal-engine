@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 4041
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "4041"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:4041", "--workers", "2", "--threads", "4", "--timeout", "60"]
