@@ -95,14 +95,14 @@ class CommandExecutionEngine:
         if not pipeline:
             return self._result("", "", 0)
 
-        piped_input: str | None = None
+        next_input: str | None = None
         last_result = self._result("", "", 0)
 
-        for index, part in enumerate(pipeline):
-            last_result = self._execute_single(session, part, piped_input)
+        for part in pipeline:
+            last_result = self._execute_single(session, part, next_input)
             if last_result["exit_code"] != 0:
                 return last_result
-            piped_input = last_result["output"] if index < len(pipeline) - 1 else None
+            next_input = last_result["output"]
 
         if redirect is not None:
             operator, target = redirect
@@ -138,6 +138,13 @@ class CommandExecutionEngine:
             "echo": self._echo,
             "cat": self._cat,
             "grep": self._grep,
+            "wc": self._wc,
+            "head": self._head,
+            "tail": self._tail,
+            "sort": self._sort,
+            "uniq": self._uniq,
+            "cut": self._cut,
+            "tr": self._tr,
             "chmod": self._chmod,
             "find": self._find,
             "ps": self._ps,
@@ -286,22 +293,97 @@ class CommandExecutionEngine:
             raise CommandError("grep: missing pattern")
 
         pattern = args[0]
-        if input_data is not None:
-            source = input_data
-        elif len(args) >= 2:
-            path = self.resolve_path(session.cwd, args[1], home=session.home)
-            node = self._get_node(session.fs, path)
-            if node is None or self._is_dir(node):
-                raise CommandError("grep: file not found")
-            source = self._content(node)
-        else:
-            raise CommandError("grep: no input provided")
+        source = self._input_or_file(session, input_data, args[1:], "grep")
 
         pattern_lower = pattern.lower()
         matches = [line for line in source.splitlines() if pattern_lower in line.lower()]
         count = len(matches)
         suffix = "match" if count == 1 else "matches"
         return self._result("\n".join(matches), "", 0, f"{count} {suffix} found")
+
+    def _wc(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        if "-l" not in args:
+            raise CommandError("wc: invalid arguments")
+
+        file_args = [arg for arg in args if arg != "-l"]
+        source = self._input_or_file(session, input_data, file_args, "wc")
+        return self._result(str(len(source.splitlines())), "", 0)
+
+    def _head(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        count, file_args = self._parse_line_count(args, "head")
+        source = self._input_or_file(session, input_data, file_args, "head")
+        return self._result("\n".join(source.splitlines()[:count]), "", 0)
+
+    def _tail(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        count, file_args = self._parse_line_count(args, "tail")
+        source = self._input_or_file(session, input_data, file_args, "tail")
+        lines = source.splitlines()
+        return self._result("\n".join(lines[-count:] if count else []), "", 0)
+
+    def _sort(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        source = self._input_or_file(session, input_data, args, "sort")
+        return self._result("\n".join(sorted(source.splitlines())), "", 0)
+
+    def _uniq(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        source = self._input_or_file(session, input_data, args, "uniq")
+        unique_lines: list[str] = []
+        previous: str | None = None
+        for line in source.splitlines():
+            if line != previous:
+                unique_lines.append(line)
+            previous = line
+        return self._result("\n".join(unique_lines), "", 0)
+
+    def _cut(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        delimiter = "\t"
+        field: int | None = None
+        file_args: list[str] = []
+        index = 0
+
+        while index < len(args):
+            arg = args[index]
+            if arg == "-d":
+                if index + 1 >= len(args):
+                    raise CommandError("cut: invalid arguments")
+                delimiter = args[index + 1]
+                index += 2
+            elif arg == "-f":
+                if index + 1 >= len(args):
+                    raise CommandError("cut: invalid arguments")
+                try:
+                    field = int(args[index + 1])
+                except ValueError as exc:
+                    raise CommandError("cut: invalid arguments") from exc
+                index += 2
+            else:
+                file_args.append(arg)
+                index += 1
+
+        if field is None or field < 1:
+            raise CommandError("cut: invalid arguments")
+
+        source = self._input_or_file(session, input_data, file_args, "cut")
+        selected: list[str] = []
+        for line in source.splitlines():
+            fields = line.split(delimiter)
+            selected.append(fields[field - 1] if field <= len(fields) else "")
+        return self._result("\n".join(selected), "", 0)
+
+    def _tr(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        if len(args) != 2:
+            raise CommandError("tr: invalid arguments")
+
+        source = self._input_or_file(session, input_data, [], "tr")
+        from_chars = self._expand_tr_set(args[0])
+        to_chars = self._expand_tr_set(args[1])
+        if not from_chars or not to_chars:
+            raise CommandError("tr: invalid arguments")
+
+        translation: dict[int, str] = {}
+        for index, char in enumerate(from_chars):
+            replacement = to_chars[index] if index < len(to_chars) else to_chars[-1]
+            translation[ord(char)] = replacement
+        return self._result(source.translate(translation), "", 0)
 
     def _chmod(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
         if len(args) < 2:
@@ -396,6 +478,66 @@ class CommandExecutionEngine:
 
         session.mode = mode
         return self._result("", "", 0, f"Mode set to {mode}")
+
+    def _input_or_file(
+        self,
+        session: TerminalSession,
+        input_data: str | None,
+        file_args: list[str],
+        command_name: str,
+    ) -> str:
+        if input_data is not None:
+            return input_data
+        if not file_args:
+            raise CommandError(f"{command_name}: no input provided")
+        if len(file_args) > 1:
+            raise CommandError(f"{command_name}: invalid arguments")
+
+        path = self.resolve_path(session.cwd, file_args[0], home=session.home)
+        node = self._get_node(session.fs, path)
+        if node is None or self._is_dir(node):
+            raise CommandError(f"{command_name}: file not found")
+        return self._content(node)
+
+    def _parse_line_count(self, args: list[str], command_name: str) -> tuple[int, list[str]]:
+        count = 10
+        file_args: list[str] = []
+        index = 0
+
+        while index < len(args):
+            arg = args[index]
+            if arg == "-n":
+                if index + 1 >= len(args):
+                    raise CommandError(f"{command_name}: invalid arguments")
+                try:
+                    count = int(args[index + 1])
+                except ValueError as exc:
+                    raise CommandError(f"{command_name}: invalid arguments") from exc
+                if count < 0:
+                    raise CommandError(f"{command_name}: invalid arguments")
+                index += 2
+            else:
+                file_args.append(arg)
+                index += 1
+
+        return count, file_args
+
+    def _expand_tr_set(self, value: str) -> str:
+        expanded: list[str] = []
+        index = 0
+
+        while index < len(value):
+            if index + 2 < len(value) and value[index + 1] == "-":
+                start = ord(value[index])
+                end = ord(value[index + 2])
+                step = 1 if start <= end else -1
+                expanded.extend(chr(code) for code in range(start, end + step, step))
+                index += 3
+            else:
+                expanded.append(value[index])
+                index += 1
+
+        return "".join(expanded)
 
     def _split_chain(self, command: str) -> list[str]:
         return [part.strip() for part in command.split("&&") if part.strip()]

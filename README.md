@@ -58,8 +58,25 @@ ls
 cd
 mkdir
 touch
+rm
 echo
 cat
+grep
+wc
+head
+tail
+sort
+uniq
+cut
+tr
+chmod
+find
+ps
+kill
+env
+export
+ping
+mode
 ```
 
 Also supported:
@@ -67,8 +84,10 @@ Also supported:
 - Relative and absolute paths
 - `..` and `~`
 - Chaining with `&&`
+- Pipelines with `|`
 - `echo text > file`
 - `echo text >> file`
+- Output redirection with `>` and `>>`
 - Bash-style errors such as `No such file or directory`
 
 ## WebSocket Protocol
