@@ -153,6 +153,8 @@ class CommandExecutionEngine:
             "export": self._export,
             "ping": self._ping,
             "mode": self._mode,
+            "cp": self._cp,
+            "mv": self._mv,
         }
 
         handler = handlers.get(command_name)
@@ -478,6 +480,76 @@ class CommandExecutionEngine:
 
         session.mode = mode
         return self._result("", "", 0, f"Mode set to {mode}")
+
+    def _cp(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        if len(args) != 2:
+            raise CommandError("cp: invalid arguments")
+
+        source_arg, dest_arg = args[0], args[1]
+
+        # Resolve paths
+        source_path = self.resolve_path(session.cwd, source_arg, home=session.home)
+        dest_path = self.resolve_path(session.cwd, dest_arg, home=session.home)
+
+        # Check if source and destination are the same
+        if source_path == dest_path:
+            raise CommandError(f"cp: '{source_arg}' and '{dest_arg}' are the same file")
+
+        # Get source node
+        source_node = self._get_node(session.fs, source_path)
+        if source_node is None:
+            raise CommandError(f"cp: cannot stat '{source_arg}': No such file or directory")
+        if self._is_dir(source_node):
+            raise CommandError(f"cp: '{source_arg}': Is a directory")
+
+        # Get destination parent and name
+        dest_parent, dest_name = self._parent_and_name(session.fs, dest_path, dest_arg)
+        dest_children = self._children(dest_parent)
+
+        # Check if destination is a directory
+        if self._is_dir(dest_children.get(dest_name)):
+            raise CommandError(f"cp: cannot overwrite directory '{dest_arg}'")
+
+        # Copy the file content
+        dest_children[dest_name] = self._file_node(self._content(source_node))
+
+        return self._result("", "", 0)
+
+    def _mv(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        if len(args) != 2:
+            raise CommandError("mv: invalid arguments")
+
+        source_arg, dest_arg = args[0], args[1]
+
+        # Resolve paths
+        source_path = self.resolve_path(session.cwd, source_arg, home=session.home)
+        dest_path = self.resolve_path(session.cwd, dest_arg, home=session.home)
+
+        # Check if source and destination are the same
+        if source_path == dest_path:
+            raise CommandError(f"mv: '{source_arg}' and '{dest_arg}' are the same file")
+
+        # Get source node and parent
+        source_parent, source_name = self._parent_and_name(session.fs, source_path, source_arg)
+        source_children = self._children(source_parent)
+        source_node = source_children.get(source_name)
+        
+        if source_node is None:
+            raise CommandError(f"mv: cannot stat '{source_arg}': No such file or directory")
+
+        # Get destination parent and name
+        dest_parent, dest_name = self._parent_and_name(session.fs, dest_path, dest_arg)
+        dest_children = self._children(dest_parent)
+
+        # Check if destination is a directory (and source is not)
+        if self._is_dir(dest_children.get(dest_name)) and not self._is_dir(source_node):
+            raise CommandError(f"mv: cannot overwrite directory '{dest_arg}' with non-directory")
+
+        # Move the file/directory
+        dest_children[dest_name] = source_node
+        del source_children[source_name]
+
+        return self._result("", "", 0)
 
     def _input_or_file(
         self,
