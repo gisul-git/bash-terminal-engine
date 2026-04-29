@@ -84,8 +84,10 @@ async def send_error_response(session: Any, websocket: WebSocket, output: str) -
 @app.websocket("/terminal")
 async def terminal(websocket: WebSocket) -> None:
     logger.info("WebSocket handler triggered")
-    origin = websocket.headers.get("origin")
+    origin = websocket.headers.get("origin", "")
+    print("Origin:", origin)
     await websocket.accept()
+    print("Linux WebSocket accepted")
     session = sessions.create()
     logger.info("WebSocket accepted for session_id=%s origin=%s", session.session_id, origin)
 
