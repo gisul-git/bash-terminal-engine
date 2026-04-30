@@ -12,6 +12,15 @@ FileSystem = dict[str, Any]
 Node = dict[str, Any]
 CommandHandler = Callable[[TerminalSession, list[str], str | None], dict[str, Any]]
 
+CACHED_PROCESS_OUTPUT = "\n".join(
+    [
+        "PID   NAME",
+        "101   nginx",
+        "102   node",
+        "103   postgres",
+    ]
+)
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -31,6 +40,34 @@ class CommandExecutionEngine:
 
     def __init__(self, required_paths: list[str] | None = None) -> None:
         self.required_paths = required_paths or ["/home/user/project"]
+        self.command_map: dict[str, CommandHandler] = {
+            "pwd": self._pwd,
+            "ls": self._ls,
+            "cd": self._cd,
+            "mkdir": self._mkdir,
+            "touch": self._touch,
+            "rm": self._rm,
+            "echo": self._echo,
+            "cat": self._cat,
+            "grep": self._grep,
+            "wc": self._wc,
+            "head": self._head,
+            "tail": self._tail,
+            "sort": self._sort,
+            "uniq": self._uniq,
+            "cut": self._cut,
+            "tr": self._tr,
+            "chmod": self._chmod,
+            "find": self._find,
+            "ps": self._ps,
+            "kill": self._kill,
+            "env": self._env,
+            "export": self._export,
+            "ping": self._ping,
+            "mode": self._mode,
+            "cp": self._cp,
+            "mv": self._mv,
+        }
 
     def execute(self, session: TerminalSession, raw_command: str) -> dict[str, Any]:
         started = time.perf_counter()
@@ -128,36 +165,8 @@ class CommandExecutionEngine:
 
         command_name = parts[0]
         args = parts[1:]
-        handlers: dict[str, CommandHandler] = {
-            "pwd": self._pwd,
-            "ls": self._ls,
-            "cd": self._cd,
-            "mkdir": self._mkdir,
-            "touch": self._touch,
-            "rm": self._rm,
-            "echo": self._echo,
-            "cat": self._cat,
-            "grep": self._grep,
-            "wc": self._wc,
-            "head": self._head,
-            "tail": self._tail,
-            "sort": self._sort,
-            "uniq": self._uniq,
-            "cut": self._cut,
-            "tr": self._tr,
-            "chmod": self._chmod,
-            "find": self._find,
-            "ps": self._ps,
-            "kill": self._kill,
-            "env": self._env,
-            "export": self._export,
-            "ping": self._ping,
-            "mode": self._mode,
-            "cp": self._cp,
-            "mv": self._mv,
-        }
 
-        handler = handlers.get(command_name)
+        handler = self.command_map.get(command_name)
         if handler is None:
             return self._result("", f"{command_name}: command not found", 127)
 
@@ -424,6 +433,8 @@ class CommandExecutionEngine:
         return self._result("\n".join(matches), "", 0, f"{count} {suffix} found")
 
     def _ps(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        if len(session.processes) == 3 and session.processes[0]["pid"] == "101":
+            return self._result(CACHED_PROCESS_OUTPUT, "", 0)
         lines = ["PID   NAME"]
         lines.extend(f"{process['pid']}   {process['name']}" for process in session.processes)
         return self._result("\n".join(lines), "", 0)

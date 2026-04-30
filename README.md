@@ -11,6 +11,9 @@ execution_engine.py
 session_manager.py
 Dockerfile
 docker-compose.yml
+gunicorn_conf.py
+uvicorn_worker.py
+nginx-terminal.conf
 requirements.txt
 README.md
 ```
@@ -24,7 +27,13 @@ pip install -r requirements.txt
 ## Run
 
 ```bash
-uvicorn main:app --host 127.0.0.1 --port 4041
+uvicorn main:app --host 127.0.0.1 --port 4041 --ws-ping-interval 20 --ws-ping-timeout 120
+```
+
+Production Docker runs Gunicorn with Uvicorn workers:
+
+```bash
+docker compose up --build
 ```
 
 The WebSocket client connects to:
@@ -33,10 +42,16 @@ The WebSocket client connects to:
 ws://localhost:4041/terminal
 ```
 
+To reconnect to an existing in-memory session, pass the previous `session_id`:
+
+```text
+ws://localhost:4041/terminal?session_id=<session-id>
+```
+
 ## Backend
 
 - FastAPI WebSocket endpoint: `/terminal`
-- One isolated session per WebSocket connection
+- One isolated session per `session_id`
 - Session fields:
   - `cwd`
   - virtual file system
@@ -46,7 +61,10 @@ ws://localhost:4041/terminal
   - `mode`
 - Virtual root starts at `/home/user`
 - Dict-backed filesystem
-- Session is deleted on disconnect
+- Session is preserved across reconnects
+- Idle sessions are cleaned up after 2 hours
+- Server sends `{ "type": "ping" }` every 20 seconds
+- Client should reply with `{ "type": "pong" }`
 
 ## Commands
 
@@ -110,11 +128,31 @@ Server init:
 {
   "type": "init",
   "data": {
-    "banner": "Welcome to Linux Terminal\n",
+    "session_id": "session-id",
     "prompt": "user@server:~$ "
   }
 }
 ```
+
+Server heartbeat:
+
+```json
+{ "type": "ping" }
+```
+
+Client heartbeat response:
+
+```json
+{ "type": "pong" }
+```
+
+## Production Notes
+
+- Default Docker log level is `WARNING`.
+- `WEB_CONCURRENCY` controls Gunicorn workers. The default formula is `(2 x CPU cores) + 1`; `docker-compose.yml` pins it to `4`.
+- `timeout` is `3600`, `keepalive` is `120`, and WebSocket ping timeout is `120`.
+- Use `nginx-terminal.conf` when deploying behind Nginx so idle WebSockets are not closed early.
+- If you run multiple containers, add sticky sessions at the load balancer or move sessions to Redis.
 
 Server command response:
 

@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV LOG_LEVEL=WARNING
+
 WORKDIR /app
 
 COPY requirements.txt .
@@ -9,4 +13,4 @@ COPY . .
 
 EXPOSE 4041
 
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:4041", "--workers", "2", "--threads", "4", "--timeout", "60"]
+CMD ["gunicorn", "-c", "gunicorn_conf.py", "main:app"]

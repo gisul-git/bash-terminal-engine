@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -9,16 +11,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from execution_engine import CommandExecutionEngine
-from session_manager import SessionManager
+from session_manager import SessionManager, TerminalSession
 
 
 logging.basicConfig(
-    level="INFO",
+    level=os.getenv("LOG_LEVEL", "WARNING").upper(),
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("terminal-engine")
 
-WEBSOCKET_IDLE_TIMEOUT = 300
+HEARTBEAT_INTERVAL_SECONDS = 20
+HEARTBEAT_TIMEOUT_SECONDS = 120
+SESSION_CLEANUP_INTERVAL_SECONDS = 300
 
 app = FastAPI(title="Terminal Engine Service")
 app.add_middleware(
@@ -32,18 +36,22 @@ engine = CommandExecutionEngine(required_paths=["/home/user/project"])
 sessions = SessionManager()
 
 
+@app.on_event("startup")
+async def start_session_cleanup() -> None:
+    asyncio.create_task(cleanup_idle_sessions())
+
+
 @app.get("/health")
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok", "active_sessions": len(sessions.sessions)})
 
 
-def command_delay(command: str) -> float:
-    command = command.strip().split(" ", 1)[0]
-    if command == "find":
-        return 0.3
-    if command in {"ls", "pwd", "cd"}:
-        return 0.1
-    return 0.2
+async def cleanup_idle_sessions() -> None:
+    while True:
+        await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
+        removed = sessions.cleanup_idle()
+        if removed:
+            logger.debug("Cleaned up %s idle terminal sessions", removed)
 
 
 def format_response(session: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -81,41 +89,54 @@ async def send_error_response(session: Any, websocket: WebSocket, output: str) -
     )
 
 
+async def heartbeat(
+    websocket: WebSocket,
+    session: TerminalSession,
+    stop_event: asyncio.Event,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+            break
+        except asyncio.TimeoutError:
+            try:
+                await websocket.send_json({"type": "ping"})
+                if time.monotonic() - session.last_seen > HEARTBEAT_TIMEOUT_SECONDS:
+                    await websocket.close(code=1000, reason="Heartbeat timeout")
+                    stop_event.set()
+                    break
+            except Exception:
+                logger.debug("Heartbeat failed for session_id=%s", session.session_id)
+                stop_event.set()
+                break
+
+
 @app.websocket("/terminal")
 async def terminal(websocket: WebSocket) -> None:
-    logger.info("WebSocket handler triggered")
+    logger.debug("WebSocket handler triggered")
     origin = websocket.headers.get("origin", "")
-    print("Origin:", origin)
+    requested_session_id = websocket.query_params.get("session_id")
     await websocket.accept()
-    print("Linux WebSocket accepted")
-    session = sessions.create()
-    logger.info("WebSocket accepted for session_id=%s origin=%s", session.session_id, origin)
+    session = sessions.get_or_create(requested_session_id)
+    logger.debug("WebSocket accepted for session_id=%s origin=%s", session.session_id, origin)
 
     await websocket.send_json(
         {
             "type": "init",
             "data": {
-                "banner": "Welcome to Terminal\n\n",
+                "session_id": session.session_id,
                 "prompt": sessions.generate_prompt(session),
             },
         }
     )
 
+    stop_heartbeat = asyncio.Event()
+    heartbeat_task = asyncio.create_task(heartbeat(websocket, session, stop_heartbeat))
+
     try:
         while True:
             try:
-                message = await asyncio.wait_for(
-                    websocket.receive_json(), timeout=WEBSOCKET_IDLE_TIMEOUT
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "WebSocket idle timeout for session_id=%s after %ss",
-                    session.session_id,
-                    WEBSOCKET_IDLE_TIMEOUT,
-                )
-                await send_error_response(session, websocket, "Connection timed out")
-                await websocket.close(code=1000, reason="Idle timeout")
-                break
+                message = await websocket.receive_json()
             except WebSocketDisconnect:
                 raise
             except Exception as exc:
@@ -127,6 +148,7 @@ async def terminal(websocket: WebSocket) -> None:
                 await send_error_response(session, websocket, "Invalid input format")
                 continue
 
+            sessions.touch(session)
             if not isinstance(message, dict):
                 logger.warning(
                     "Invalid message payload type for session_id=%s payload_type=%s",
@@ -136,13 +158,16 @@ async def terminal(websocket: WebSocket) -> None:
                 await send_error_response(session, websocket, "Invalid input format")
                 continue
 
-            logger.info("Received: %s", message)
+            logger.debug("Received: %s", message)
             if "type" not in message:
                 logger.warning("Missing message type for session_id=%s", session.session_id)
                 await send_error_response(session, websocket, "Missing message type")
                 continue
 
             message_type = message.get("type")
+
+            if message_type == "pong":
+                continue
 
             if message_type == "command":
                 command = str(message.get("data", ""))
@@ -158,9 +183,8 @@ async def terminal(websocket: WebSocket) -> None:
                         "output": visible_output,
                     }
                 )
-                await asyncio.sleep(command_delay(command))
 
-                logger.info("Sending response")
+                logger.debug("Sending command response")
                 await websocket.send_json(format_response(session, result))
                 continue
 
@@ -170,29 +194,29 @@ async def terminal(websocket: WebSocket) -> None:
                     session.mode = mode
                     result = {
                         "output": f"Mode set to {mode}" if mode == "learning" else "",
-                    "error": "",
-                    "message": f"Mode set to {mode}",
-                    "status": "success",
-                    "exit_code": 0,
-                    "duration_ms": 0,
+                        "error": "",
+                        "message": f"Mode set to {mode}",
+                        "status": "success",
+                        "exit_code": 0,
+                        "duration_ms": 0,
                     }
                 else:
                     result = {
                         "output": "",
                         "error": "mode: expected exam or learning",
-                    "message": "",
-                    "status": "error",
-                    "exit_code": 1,
-                    "duration_ms": 0,
-                }
-                logger.info("Sending response")
+                        "message": "",
+                        "status": "error",
+                        "exit_code": 1,
+                        "duration_ms": 0,
+                    }
+                logger.debug("Sending mode response")
                 await websocket.send_json(format_response(session, result))
                 continue
 
             if message_type == "submit":
                 session.result = engine.evaluate(session)
                 history_output = build_terminal_history(session)
-                logger.info("Sending response")
+                logger.debug("Sending submit response")
                 await websocket.send_json(
                     {
                         "type": "response",
@@ -204,13 +228,12 @@ async def terminal(websocket: WebSocket) -> None:
                 )
                 continue
 
-            logger.info("Sending response")
             await send_error_response(
                 session, websocket, f"Unsupported message type: {message_type}"
             )
 
     except WebSocketDisconnect:
-        logger.info("Client disconnected session_id=%s", session.session_id)
+        logger.debug("Client disconnected session_id=%s", session.session_id)
     except Exception as exc:
         logger.exception("Unhandled error in session_id=%s error=%s", session.session_id, str(exc))
         try:
@@ -225,4 +248,22 @@ async def terminal(websocket: WebSocket) -> None:
         except Exception:
             logger.debug("WebSocket already closed for session_id=%s", session.session_id)
     finally:
-        sessions.delete(session.session_id)
+        sessions.touch(session)
+        stop_heartbeat.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=4041,
+        ws_ping_interval=HEARTBEAT_INTERVAL_SECONDS,
+        ws_ping_timeout=HEARTBEAT_TIMEOUT_SECONDS,
+    )
