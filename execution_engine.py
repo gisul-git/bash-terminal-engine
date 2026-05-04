@@ -67,6 +67,8 @@ class CommandExecutionEngine:
             "mode": self._mode,
             "cp": self._cp,
             "mv": self._mv,
+            "nano": self._nano,
+            "sudo": self._sudo,
         }
 
     def execute(self, session: TerminalSession, raw_command: str) -> dict[str, Any]:
@@ -83,6 +85,11 @@ class CommandExecutionEngine:
                     result = self._execute_pipeline(session, segment)
                 except CommandError as exc:
                     result = self._result("", str(exc), exc.exit_code)
+                
+                # Check if this is a special response type (like nano)
+                if result.get("type") == "nano":
+                    return result
+                
                 if result["output"]:
                     output.append(result["output"])
                 if result["error"]:
@@ -303,14 +310,27 @@ class CommandExecutionEngine:
         if not args:
             raise CommandError("grep: missing pattern")
 
-        pattern = args[0]
-        source = self._input_or_file(session, input_data, args[1:], "grep")
+        # Check for -c flag
+        count_only = "-c" in args
+        filtered_args = [arg for arg in args if arg != "-c"]
+        
+        if not filtered_args:
+            raise CommandError("grep: missing pattern")
+
+        pattern = filtered_args[0]
+        source = self._input_or_file(session, input_data, filtered_args[1:], "grep")
 
         pattern_lower = pattern.lower()
         matches = [line for line in source.splitlines() if pattern_lower in line.lower()]
         count = len(matches)
-        suffix = "match" if count == 1 else "matches"
-        return self._result("\n".join(matches), "", 0, f"{count} {suffix} found")
+        
+        if count_only:
+            # Return only the count
+            return self._result(str(count), "", 0)
+        else:
+            # Return matching lines with message
+            suffix = "match" if count == 1 else "matches"
+            return self._result("\n".join(matches), "", 0, f"{count} {suffix} found")
 
     def _wc(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
         if "-l" not in args:
@@ -561,6 +581,61 @@ class CommandExecutionEngine:
         del source_children[source_name]
 
         return self._result("", "", 0)
+
+    def _nano(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        if not args:
+            raise CommandError("nano: missing file operand")
+
+        filename = args[0]
+        path = self.resolve_path(session.cwd, filename, home=session.home)
+        node = self._get_node(session.fs, path)
+        
+        # Check if it's a directory
+        if node is not None and self._is_dir(node):
+            raise CommandError(f"nano: {filename}: Is a directory")
+        
+        # Get file content (empty if file doesn't exist)
+        content = self._content(node) if node is not None else ""
+        
+        # Return a special response type for nano editor
+        # Frontend should handle this by opening an editor modal
+        return {
+            "output": "",
+            "error": "",
+            "message": "",
+            "exit_code": 0,
+            "type": "nano",
+            "data": {
+                "filename": filename,
+                "path": path,
+                "content": content
+            }
+        }
+
+    def _sudo(self, session: TerminalSession, args: list[str], input_data: str | None) -> dict[str, Any]:
+        if not args:
+            raise CommandError("sudo: missing command")
+
+        # Extract the command after sudo
+        command_name = args[0]
+        command_args = args[1:]
+        
+        # Check if command exists
+        handler = self.command_map.get(command_name)
+        if handler is None:
+            return self._result("", f"sudo: {command_name}: command not found", 127)
+        
+        # Execute the command with elevated privileges (simulated)
+        try:
+            result = handler(session, command_args, input_data)
+            # Add a message indicating sudo was used
+            if result.get("message"):
+                result["message"] = f"[sudo] {result['message']}"
+            else:
+                result["message"] = f"[sudo] Command executed with elevated privileges"
+            return result
+        except CommandError as exc:
+            return self._result("", f"sudo: {exc}", exc.exit_code)
 
     def _input_or_file(
         self,

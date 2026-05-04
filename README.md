@@ -79,7 +79,7 @@ touch
 rm
 echo
 cat
-grep
+grep (with -c flag for counting)
 wc
 head
 tail
@@ -95,7 +95,30 @@ env
 export
 ping
 mode
+cp
+mv
+nano (simulated editor)
+sudo (privilege wrapper)
 ```
+
+### 🆕 New Features
+
+**grep -c** - Count matching lines instead of displaying them
+```bash
+grep -c "ERROR" logfile.txt  # Returns: 5
+```
+
+**nano** - Simulated text editor that returns file content for frontend editing
+```bash
+nano config.txt  # Opens editor modal in frontend
+```
+
+**sudo** - Privilege escalation wrapper (simulated, no actual privileges)
+```bash
+sudo mkdir /admin  # Executes with [sudo] indicator
+```
+
+See [NEW_FEATURES.md](NEW_FEATURES.md) for complete documentation.
 
 Also supported:
 
@@ -122,6 +145,18 @@ Client submit:
 { "type": "submit" }
 ```
 
+Client nano save (after editing):
+
+```json
+{
+  "type": "nano_save",
+  "data": {
+    "file": "config.txt",
+    "content": "updated file content"
+  }
+}
+```
+
 Server init:
 
 ```json
@@ -130,6 +165,19 @@ Server init:
   "data": {
     "session_id": "session-id",
     "prompt": "user@server:~$ "
+  }
+}
+```
+
+Server nano response:
+
+```json
+{
+  "type": "nano",
+  "data": {
+    "filename": "config.txt",
+    "path": "/home/user/config.txt",
+    "content": "existing file content"
   }
 }
 ```

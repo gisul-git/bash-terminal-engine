@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import time
 from typing import Any
 
@@ -55,6 +56,13 @@ async def cleanup_idle_sessions() -> None:
 
 
 def format_response(session: Any, result: dict[str, Any]) -> dict[str, Any]:
+    # Check if this is a special nano response
+    if result.get("type") == "nano":
+        return {
+            "type": "nano",
+            "data": result.get("data", {}),
+        }
+    
     output = result.get("output") or ""
     error = result.get("error") or ""
     combined_output = "\n".join(part for part in (output, error) if part)
@@ -226,6 +234,36 @@ async def terminal(websocket: WebSocket) -> None:
                         },
                     }
                 )
+                continue
+
+            if message_type == "nano_save":
+                data = message.get("data", {})
+                filename = data.get("file")
+                content = data.get("content", "")
+                
+                if not filename:
+                    await send_error_response(session, websocket, "nano: missing filename")
+                    continue
+                
+                # Save the file using echo redirection
+                save_command = f"echo {shlex.quote(content)} > {shlex.quote(filename)}"
+                result = engine.execute(session, save_command)
+                
+                # Send confirmation
+                if result.get("exit_code") == 0:
+                    await websocket.send_json(
+                        {
+                            "type": "response",
+                            "data": {
+                                "output": f"File {filename} saved",
+                                "prompt": sessions.generate_prompt(session),
+                            },
+                        }
+                    )
+                else:
+                    await send_error_response(
+                        session, websocket, result.get("error", "Failed to save file")
+                    )
                 continue
 
             await send_error_response(
