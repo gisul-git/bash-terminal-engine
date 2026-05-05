@@ -198,9 +198,21 @@ Client heartbeat response:
 
 - Default Docker log level is `WARNING`.
 - `WEB_CONCURRENCY` controls Gunicorn workers. The default formula is `(2 x CPU cores) + 1`; `docker-compose.yml` pins it to `4`.
-- `timeout` is `3600`, `keepalive` is `120`, and WebSocket ping timeout is `120`.
+- `timeout` is `7200` (120 minutes), `keepalive` is `300` (5 minutes), and WebSocket ping timeout is `300` (5 minutes).
+- **Long-running session support**: Sessions stay alive for up to 120 minutes with automatic heartbeat every 30 seconds.
 - Use `nginx-terminal.conf` when deploying behind Nginx so idle WebSockets are not closed early.
 - If you run multiple containers, add sticky sessions at the load balancer or move sessions to Redis.
+
+### Long-Running Sessions
+
+The engine is optimized for long-running sessions (up to 120 minutes):
+
+- **Automatic heartbeat**: Server sends ping every 30 seconds
+- **Session timeout**: 7200 seconds (120 minutes) of inactivity
+- **Graceful cleanup**: Expired sessions cleaned up every 10 minutes
+- **Client requirement**: Must respond to `{"type":"ping"}` with `{"type":"pong"}`
+
+See [LONG_RUNNING_SESSIONS.md](LONG_RUNNING_SESSIONS.md) for detailed configuration.
 
 Server command response:
 

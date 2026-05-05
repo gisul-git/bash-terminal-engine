@@ -21,9 +21,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("terminal-engine")
 
-HEARTBEAT_INTERVAL_SECONDS = 20
-HEARTBEAT_TIMEOUT_SECONDS = 120
-SESSION_CLEANUP_INTERVAL_SECONDS = 300
+# Long-running session support (120 minutes)
+HEARTBEAT_INTERVAL_SECONDS = 30  # Send ping every 30 seconds
+HEARTBEAT_TIMEOUT_SECONDS = 300  # 5 minutes timeout for heartbeat response
+SESSION_CLEANUP_INTERVAL_SECONDS = 600  # Check for idle sessions every 10 minutes
 
 app = FastAPI(title="Terminal Engine Service")
 app.add_middleware(
@@ -34,7 +35,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 engine = CommandExecutionEngine(required_paths=["/home/user/project"])
-sessions = SessionManager()
+# Session manager with 120-minute idle timeout (7200 seconds)
+sessions = SessionManager(idle_ttl_seconds=7200)
 
 
 @app.on_event("startup")
@@ -302,6 +304,7 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=4041,
-        ws_ping_interval=HEARTBEAT_INTERVAL_SECONDS,
-        ws_ping_timeout=HEARTBEAT_TIMEOUT_SECONDS,
+        ws_ping_interval=30,  # Send WebSocket ping every 30 seconds
+        ws_ping_timeout=300,  # 5 minutes timeout for ping response
+        timeout_keep_alive=300,  # Keep connection alive for 5 minutes
     )
